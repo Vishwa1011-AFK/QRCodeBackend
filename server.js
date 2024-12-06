@@ -8,7 +8,7 @@ const productRoutes = require('./routes/productRoutes');
 const app = express();
 const corsOptions = {
     origin: (origin, callback) => {
-      const allowedOrigins = ['https://qr-code-frontend-rouge.vercel.app/'];
+      const allowedOrigins = ['https://qr-code-frontend-rouge.vercel.app'];
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
