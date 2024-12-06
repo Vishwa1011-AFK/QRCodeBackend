@@ -16,7 +16,7 @@
   },
   "name": "qrcode",
   "version": "1.0.0",
-  "main": "app.js",
+  "main": "server.js",
   "author": "",
   "license": "ISC",
   "description": ""
