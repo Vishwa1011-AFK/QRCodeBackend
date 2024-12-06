@@ -6,9 +6,14 @@ const bodyParser = require('body-parser');
 const productRoutes = require('./routes/productRoutes');
 
 const app = express();
-
+const corsOptions = {
+    origin: 'https://qr-code-frontend-rouge.vercel.app/',  
+    methods: ['GET', 'POST', 'PUT', 'DELETE'], 
+    allowedHeaders: ['Content-Type', 'Authorization']
+};
+  
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(bodyParser.json());
 
 // Routes
