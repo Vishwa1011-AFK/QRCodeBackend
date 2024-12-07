@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const Product = require('../models/product');
 const Scan = require('../models/scan');
 
-const SECRET_KEY = process.env.JWT_SECRET_KEY;
+const SECRET_KEY = process.env.AES_SECRET_KEY;
 
 const signQRCode = (req, res) => {
     const { name, stationId, uuid } = req.body;
