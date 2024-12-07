@@ -6,6 +6,6 @@ const router = express.Router();
 router.post('/sign', signQRCode);
 
 // Route for verifying signed QR code
-router.post('/verify', scanQRCode);
+router.post('/scan', scanQRCode);
 
 module.exports = router;
