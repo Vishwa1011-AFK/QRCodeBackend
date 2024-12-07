@@ -34,18 +34,6 @@ const signQRCode = (req, res) => {
         });
 };
 
-const verifyQRCode = (req, res) => {
-    const { signedQRCode } = req.body;
-
-    try {
-        const decodedData = jwt.verify(signedQRCode, SECRET_KEY);
-        res.json({ message: 'QR code is valid', decodedData });
-    } catch (error) {
-        console.error('Invalid QR code:', error);
-        res.status(400).json({ error: 'Invalid or expired QR code' });
-    }
-};
-
 const scanQRCode = async (req, res) => {
     const { signedQRCode, location } = req.body;
 
@@ -70,4 +58,4 @@ const scanQRCode = async (req, res) => {
     }
 };
 
-module.exports = { signQRCode, verifyQRCode, scanQRCode };
+module.exports = { signQRCode, scanQRCode };
