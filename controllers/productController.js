@@ -1,3 +1,4 @@
+require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const Product = require('../models/product');
 const Scan = require('../models/scan');
