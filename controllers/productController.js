@@ -127,12 +127,13 @@ const scanQRCodeUnified = async (req, res) => {
     try {
         const decodedData = jwt.verify(signedQRCode, SECRET_KEY);
 
+        // Handle Master QR Code (Batch-level Scan)
         if (decodedData.batchId && !decodedData.uuid) {
-            // This is a master QR code
             const { batchId } = decodedData;
 
+            // Fetch all products in the batch
             const products = await Product.find({ batchId });
-            if (products.length === 0) {
+            if (!products.length) {
                 return res.status(404).json({ error: 'No products found for this batch' });
             }
 
@@ -140,43 +141,96 @@ const scanQRCodeUnified = async (req, res) => {
             const scanEntries = products.map(product => ({
                 productId: product._id,
                 location: { latitude, longitude },
+                scannedAt: new Date(),  // Use `scannedAt` here for consistency
             }));
 
+            // Insert scan records for each product in the batch
             await Scan.insertMany(scanEntries);
 
-            // Return batch data in the expected format
+            // Get the scan history for the batch (all products in the batch)
+            const productIds = products.map(product => product._id);
+            const scanHistory = await Scan.find({ productId: { $in: productIds } })
+                .sort({ scannedAt: -1 }) // Sort by most recent scan
+                .lean();
+
+            // Group scan history by date
+            const groupedScans = scanHistory.reduce((acc, scan) => {
+                const date = scan.scannedAt.toLocaleDateString();  // Use `scannedAt` here
+                if (!acc[date]) acc[date] = [];
+                acc[date].push(scan);
+                return acc;
+            }, {});
+
+            // Prepare the response
             return res.json({
                 batch: {
                     batchId: batchId,
                     products: products.map(product => ({
                         name: product.name,
                         stationId: product.stationId,
-                        uuid: product.uuid
+                        uuid: product.uuid,
+                    })),
+                    scanHistory: Object.entries(groupedScans).map(([date, scans]) => ({
+                        date,
+                        locations: scans.map(scan => ({
+                            latitude: scan.location.latitude,
+                            longitude: scan.location.longitude,
+                            time: scan.scannedAt.toLocaleTimeString(), // Use the existing `scannedAt`
+                        }))
                     }))
                 }
             });
         }
 
+        // Handle Individual Product QR Code
         if (decodedData.uuid) {
-            // This is an individual product QR code
             const product = await Product.findOne({ uuid: decodedData.uuid });
             if (!product) {
                 return res.status(404).json({ error: 'Product not found' });
             }
 
+            // Create new scan entry
             const scan = new Scan({
                 productId: product._id,
                 location,
+                scannedAt: new Date(),  // Consistent timestamp field
             });
             await scan.save();
 
-            return res.json({ product });
+            // Fetch scan history for the product
+            const scanHistory = await Scan.find({ productId: product._id })
+                .sort({ scannedAt: -1 })  // Sort by most recent scan
+                .lean();
+
+            // Group scan history by date
+            const groupedScans = scanHistory.reduce((acc, scan) => {
+                const date = scan.scannedAt.toLocaleDateString();
+                if (!acc[date]) acc[date] = [];
+                acc[date].push(scan);
+                return acc;
+            }, {});
+
+            // Return product with scan history
+            return res.json({
+                product: {
+                    ...product.toObject(),
+                    scanHistory: Object.entries(groupedScans).map(([date, scans]) => ({
+                        date,
+                        locations: scans.map(scan => ({
+                            latitude: scan.location.latitude,
+                            longitude: scan.location.longitude,
+                            time: scan.scannedAt.toLocaleTimeString(),
+                        }))
+                    }))
+                }
+            });
         }
 
-        res.status(400).json({ error: 'Unrecognized QR code type' });
+        // Error: Unrecognized QR code type
+        return res.status(400).json({ error: 'Unrecognized QR code type' });
     } catch (error) {
         console.error('Error verifying QR code:', error);
-        res.status(400).json({ error: 'Invalid or expired QR code' });
+        return res.status(400).json({ error: 'Invalid or expired QR code' });
     }
 };
 
