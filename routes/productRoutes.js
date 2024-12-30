@@ -8,4 +8,7 @@ router.post('/sign', signQRCodeBatch);
 // Route for scanning individual product or master QR codes
 router.post('/scan', scanQRCodeUnified);
 
+router.get('/batch/:batchId/download', downloadBatchZip);
+
+
 module.exports = router;
