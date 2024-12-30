@@ -1,5 +1,5 @@
 const express = require('express');
-const { signQRCodeBatch, scanQRCodeUnified } = require('../controllers/productController');
+const { signQRCodeBatch, scanQRCodeUnified, downloadBatchZip } = require('../controllers/productController');
 const router = express.Router();
 
 // Route for signing a batch of QR codes and generating a master QR code
