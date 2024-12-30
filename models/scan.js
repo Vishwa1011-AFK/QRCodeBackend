@@ -1,12 +1,24 @@
 const mongoose = require('mongoose');
 
-const ScanSchema = new mongoose.Schema({
+const scanSchema = new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
     location: {
-        latitude: { type: Number, required: true },
-        longitude: { type: Number, required: true },
+        latitude: {
+            type: Number,
+            required: true,
+            min: -90,
+            max: 90,
+        },
+        longitude: {
+            type: Number,
+            required: true,
+            min: -180,
+            max: 180,
+        },
     },
     scannedAt: { type: Date, default: Date.now },
 });
 
-module.exports = mongoose.model('Scan', ScanSchema);
+scanSchema.index({ productId: 1 });
+
+module.exports = mongoose.model('Scan', scanSchema);
