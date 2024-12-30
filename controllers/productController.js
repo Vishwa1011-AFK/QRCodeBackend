@@ -120,6 +120,66 @@ const signQRCodeBatch = async (req, res) => {
     }
 };
 
+
+const scanQRCodeUnified = async (req, res) => {
+    const { signedQRCode, location } = req.body;
+
+    try {
+        const decodedData = jwt.verify(signedQRCode, SECRET_KEY);
+
+        if (decodedData.batchId && !decodedData.uuid) {
+            // This is a master QR code
+            const { batchId } = decodedData;
+
+            const products = await Product.find({ batchId });
+            if (products.length === 0) {
+                return res.status(404).json({ error: 'No products found for this batch' });
+            }
+
+            const { latitude, longitude } = location;
+            const scanEntries = products.map(product => ({
+                productId: product._id,
+                location: { latitude, longitude },
+            }));
+
+            await Scan.insertMany(scanEntries);
+
+            // Return batch data in the expected format
+            return res.json({
+                batch: {
+                    batchId: batchId,
+                    products: products.map(product => ({
+                        name: product.name,
+                        stationId: product.stationId,
+                        uuid: product.uuid
+                    }))
+                }
+            });
+        }
+
+        if (decodedData.uuid) {
+            // This is an individual product QR code
+            const product = await Product.findOne({ uuid: decodedData.uuid });
+            if (!product) {
+                return res.status(404).json({ error: 'Product not found' });
+            }
+
+            const scan = new Scan({
+                productId: product._id,
+                location,
+            });
+            await scan.save();
+
+            return res.json({ product });
+        }
+
+        res.status(400).json({ error: 'Unrecognized QR code type' });
+    } catch (error) {
+        console.error('Error verifying QR code:', error);
+        res.status(400).json({ error: 'Invalid or expired QR code' });
+    }
+};
+
 module.exports = {
     signQRCodeBatch,
     scanQRCodeUnified,
