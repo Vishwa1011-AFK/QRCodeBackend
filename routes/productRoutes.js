@@ -10,7 +10,7 @@ router.post('/scan', scanQRCodeUnified);
 
 router.get('/batch/:batchId/download', downloadBatchZip);
 
-router.get('/api/scan-history', getScanHistory);
+router.get('/scan-history', getScanHistory);
 
 
 module.exports = router;
