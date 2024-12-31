@@ -180,8 +180,87 @@ const scanQRCodeUnified = async (req, res) => {
     }
 };
 
+const getScanHistory = async (req, res) => {
+    const { signedQRCode } = req.query;
+    
+    try {
+        // First try to find if it's a master QR code
+        const masterQR = await MasterQRCode.findOne({ 
+            masterQRCode: signedQRCode 
+        }).lean();
+
+        if (masterQR) {
+            // If master QR, get all products in batch
+            const products = await Product.find({ 
+                batchId: masterQR.batchId 
+            }).lean();
+
+            const productsWithScans = await Promise.all(products.map(async (product) => {
+                const scans = await Scan.find({ 
+                    productId: product._id 
+                })
+                .sort('-scannedAt')
+                .lean();
+
+                return {
+                    ...product,
+                    scans: scans.map(scan => ({
+                        location: scan.location,
+                        scannedAt: scan.scannedAt
+                    }))
+                };
+            }));
+
+            return res.json({
+                type: 'batch',
+                data: {
+                    batchId: masterQR.batchId,
+                    createdAt: masterQR.createdAt,
+                    scanRecords: masterQR.scanRecords,
+                    products: productsWithScans
+                }
+            });
+        }
+
+        // If not master QR, look for individual product
+        const product = await Product.findOne({ 
+            signedQRCode 
+        }).lean();
+
+        if (product) {
+            const scans = await Scan.find({ 
+                productId: product._id 
+            })
+            .sort('-scannedAt')
+            .lean();
+
+            return res.json({
+                type: 'product',
+                data: {
+                    ...product,
+                    scans: scans.map(scan => ({
+                        location: scan.location,
+                        scannedAt: scan.scannedAt
+                    }))
+                }
+            });
+        }
+
+        return res.status(404).json({ 
+            error: 'No scan history found for this QR code' 
+        });
+
+    } catch (error) {
+        console.error('Error fetching scan history:', error);
+        res.status(500).json({ 
+            error: 'Failed to fetch scan history' 
+        });
+    }
+};
+
 module.exports = {
     signQRCodeBatch,
     scanQRCodeUnified,
-    downloadBatchZip
+    downloadBatchZip,
+    getScanHistory
 };
