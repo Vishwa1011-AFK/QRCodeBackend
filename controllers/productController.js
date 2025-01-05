@@ -239,7 +239,7 @@ const scanQRCodeSeller = async (req, res) => {
 
 
 const getScanHistory = async (req, res) => {
-    const { signedQRCode, isSeller = false } = req.query;
+    const { signedQRCode } = req.query;
 
     try {
         // First try to find if it's a master QR code
@@ -254,19 +254,9 @@ const getScanHistory = async (req, res) => {
             }).lean();
 
             const productsWithScans = await Promise.all(products.map(async (product) => {
-                let scans;
-                if (isSeller) {
-                    scans = await SellerScan.find({ productId: product._id })
-                        .sort('-scannedAt')
-                        .lean();
-                } else {
-                      scans = await Scan.find({
-                         productId: product._id
-                     })
-                        .sort('-scannedAt')
-                        .lean();
-                  
-                }
+                const scans = await SellerScan.find({ productId: product._id })
+                    .sort('-scannedAt')
+                    .lean();
 
                 return {
                     ...product,
@@ -294,18 +284,11 @@ const getScanHistory = async (req, res) => {
         }).lean();
 
         if (product) {
-            let scans;
-               if (isSeller) {
-                    scans = await SellerScan.find({ productId: product._id })
-                        .sort('-scannedAt')
-                        .lean();
-                } else {
-                    scans = await Scan.find({
-                        productId: product._id
-                    })
-                        .sort('-scannedAt')
-                        .lean();
-                }
+            const scans = await SellerScan.find({
+                productId: product._id
+            })
+                .sort('-scannedAt')
+                .lean();
 
             return res.json({
                 type: 'product',
