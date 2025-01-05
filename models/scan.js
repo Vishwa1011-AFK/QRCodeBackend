@@ -16,6 +16,7 @@ const scanSchema = new mongoose.Schema({
             max: 180,
         },
     },
+   locationName: {type: String },  // add the locationName here
     scannedAt: { type: Date, default: Date.now },
 });
 

@@ -8,7 +8,8 @@ const archiver = require('archiver');
 const Product = require('../models/product');
 const Scan = require('../models/scan');
 const MasterQRCode = require('../models/masterQRCode');
-const SellerScan = require('../models/sellerScan'); // Import the new model
+const SellerScan = require('../models/sellerScan');
+const fetch = require('node-fetch');
 
 const SECRET_KEY = process.env.AES_SECRET_KEY;
 
@@ -121,6 +122,21 @@ const signQRCodeBatch = async (req, res) => {
     }
 };
 
+const fetchLocationName = async (latitude, longitude) => {
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      return data.display_name || 'Location Name Not Found';
+    } catch (error) {
+      console.error('Error fetching location name:', error);
+      return 'Error Fetching Location';
+    }
+};
 
 const scanQRCodeUnified = async (req, res) => {
     const { signedQRCode, location } = req.body;
@@ -137,9 +153,11 @@ const scanQRCodeUnified = async (req, res) => {
             }
 
              const { latitude, longitude } = location;
+             const locationName = await fetchLocationName(latitude,longitude)
             const scanEntries = products.map(product => ({
                 productId: product._id,
                 location: { latitude, longitude },
+                locationName : locationName,
             }));
                 
              await Scan.insertMany(scanEntries);
@@ -163,10 +181,13 @@ const scanQRCodeUnified = async (req, res) => {
             if (!product) {
                 return res.status(404).json({ error: 'Product not found' });
             }
-           
+           const { latitude, longitude } = location;
+          const locationName = await fetchLocationName(latitude,longitude)
+
             const scan = new Scan({
                 productId: product._id,
                 location,
+                 locationName : locationName,
             });
             await scan.save();
 
@@ -195,9 +216,11 @@ const scanQRCodeSeller = async (req, res) => {
             }
 
             const { latitude, longitude } = location;
+              const locationName = await fetchLocationName(latitude,longitude)
             const sellerScanEntries = products.map(product => ({
                 productId: product._id,
-                location: { latitude, longitude }
+                location: { latitude, longitude },
+               locationName: locationName
             }));
                 
             await SellerScan.insertMany(sellerScanEntries);
@@ -220,10 +243,12 @@ const scanQRCodeSeller = async (req, res) => {
             if (!product) {
                 return res.status(404).json({ error: 'Product not found' });
             }
-           
+              const { latitude, longitude } = location;
+             const locationName = await fetchLocationName(latitude,longitude)
             const sellerScan = new SellerScan({
                 productId: product._id,
                 location,
+               locationName : locationName,
             });
             await sellerScan.save();
 
@@ -236,37 +261,37 @@ const scanQRCodeSeller = async (req, res) => {
         res.status(400).json({ error: 'Invalid or expired QR code' });
     }
 };
-
-
-const getScanHistory = async (req, res) => {
+    
+    const getScanHistory = async (req, res) => {
     const { signedQRCode } = req.query;
-
     try {
         // First try to find if it's a master QR code
         const masterQR = await MasterQRCode.findOne({
             masterQRCode: signedQRCode
         }).lean();
-
+    
         if (masterQR) {
             // If master QR, get all products in batch
             const products = await Product.find({
                 batchId: masterQR.batchId
             }).lean();
-
+    
             const productsWithScans = await Promise.all(products.map(async (product) => {
                 const scans = await SellerScan.find({ productId: product._id })
                     .sort('-scannedAt')
                     .lean();
-
+    
                 return {
                     ...product,
-                    scans: scans.map(scan => ({
-                        location: scan.location,
-                        scannedAt: scan.scannedAt
-                    }))
+                     scans: scans.map(scan => ({
+                              location: scan.location,
+                            scannedAt: scan.scannedAt,
+                            locationName: scan.locationName,
+                        }))
+    
                 };
             }));
-
+    
             return res.json({
                 type: 'batch',
                 data: {
@@ -277,35 +302,36 @@ const getScanHistory = async (req, res) => {
                 }
             });
         }
-
+    
         // If not master QR, look for individual product
         const product = await Product.findOne({
             signedQRCode
         }).lean();
-
+    
         if (product) {
             const scans = await SellerScan.find({
                 productId: product._id
             })
-                .sort('-scannedAt')
-                .lean();
-
-            return res.json({
+            .sort('-scannedAt')
+            .lean();
+    
+             return res.json({
                 type: 'product',
                 data: {
                     ...product,
-                    scans: scans.map(scan => ({
-                        location: scan.location,
-                        scannedAt: scan.scannedAt
-                    }))
+                     scans: scans.map(scan => ({
+                             location: scan.location,
+                            scannedAt: scan.scannedAt,
+                             locationName: scan.locationName
+                        }))
                 }
             });
         }
-
+    
         return res.status(404).json({
             error: 'No scan history found for this QR code'
         });
-
+    
     } catch (error) {
         console.error('Error fetching scan history:', error);
         res.status(500).json({
@@ -313,10 +339,11 @@ const getScanHistory = async (req, res) => {
         });
     }
 };
+
 module.exports = {
-    signQRCodeBatch,
-    scanQRCodeUnified,
-    downloadBatchZip,
-    getScanHistory,
-    scanQRCodeSeller,
+signQRCodeBatch,
+scanQRCodeUnified,
+downloadBatchZip,
+getScanHistory,
+scanQRCodeSeller,
 };
