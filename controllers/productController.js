@@ -10,8 +10,45 @@ const Scan = require('../models/scan');
 const MasterQRCode = require('../models/masterQRCode');
 const SellerScan = require('../models/sellerScan');
 const fetch = require('node-fetch');
+const crypto = require('crypto');
 
 const SECRET_KEY = process.env.AES_SECRET_KEY;
+const HMAC_SECRET_KEY = process.env.HMAC_SECRET_KEY;
+const IV_LENGTH = 16;
+
+// Helper functions for encryption and HMAC
+function encrypt(text, key) {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(key), iv);
+  let encrypted = cipher.update(text);
+
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+
+  return iv.toString('hex') + ':' + encrypted.toString('hex');
+}
+
+function decrypt(text, key) {
+  const textParts = text.split(':');
+  const iv = Buffer.from(textParts.shift(), 'hex');
+  const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(key), iv);
+  let decrypted = decipher.update(encryptedText);
+
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+  return decrypted.toString();
+}
+
+function generateHMAC(data, key) {
+  const hmac = crypto.createHmac('sha256', key); // Or another strong hash algorithm
+  hmac.update(data);
+  return hmac.digest('hex');
+}
+
+function verifyHMAC(data, hmac, key) {
+  const expectedHmac = generateHMAC(data, key);
+  return crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expectedHmac, 'hex'));
+}
 
 // Add new endpoint for downloading ZIP file
 const downloadBatchZip = async (req, res) => {
@@ -31,7 +68,13 @@ const downloadBatchZip = async (req, res) => {
         // Generate QR code images for each product
         for (const product of products) {
             const filePath = path.join(tempDir, `${product.uuid}.png`);
-            await QRCode.toFile(filePath, product.signedQRCode);
+            try{
+                 const qrCodeData = JSON.parse(product.signedQRCode); // needs to parse the string since is now JSON string
+                 await QRCode.toFile(filePath, qrCodeData.token);
+                } catch (error){
+                    console.error('Error generating QR code:', error);
+                    res.status(500).json({ error: 'Error generating QR codes' });
+                }
             imagePaths.push(filePath);
         }
 
@@ -39,7 +82,13 @@ const downloadBatchZip = async (req, res) => {
         const masterQRCode = await MasterQRCode.findOne({ batchId });
         if (masterQRCode) {
             const masterFilePath = path.join(tempDir, `master-${batchId}.png`);
-            await QRCode.toFile(masterFilePath, masterQRCode.masterQRCode);
+             try{
+                 const qrCodeData = JSON.parse(masterQRCode.masterQRCode); // needs to parse the string since is now JSON string
+                 await QRCode.toFile(masterFilePath, qrCodeData.token);
+             } catch (error){
+                    console.error('Error generating QR code:', error);
+                    res.status(500).json({ error: 'Error generating QR codes' });
+                }
             imagePaths.push(masterFilePath);
         }
 
@@ -65,8 +114,18 @@ const downloadBatchZip = async (req, res) => {
 
         // Clean up files after sending
         fileStream.on('close', () => {
-            imagePaths.forEach((filePath) => fs.unlinkSync(filePath));
-            fs.unlinkSync(zipFilePath);
+            imagePaths.forEach((filePath) => {
+                 try{
+                    fs.unlinkSync(filePath)
+                }catch (error){
+                    console.error('Error deleting file:', error);
+                }
+            });
+              try{
+                 fs.unlinkSync(zipFilePath)
+                }catch (error){
+                    console.error('Error deleting file:', error);
+                }
         });
 
     } catch (error) {
@@ -75,7 +134,6 @@ const downloadBatchZip = async (req, res) => {
     }
 };
 
-// Update the signQRCodeBatch function to not handle ZIP generation
 const signQRCodeBatch = async (req, res) => {
     const { name, stationId, numberOfCodes } = req.body;
     const batchId = uuidv4();
@@ -85,27 +143,44 @@ const signQRCodeBatch = async (req, res) => {
         for (let i = 0; i < numberOfCodes; i++) {
             const uuid = uuidv4();
             const qrData = { name, stationId, uuid };
-            const signedQRCode = jwt.sign(qrData, SECRET_KEY, { expiresIn: '1y' });
 
+            // Encrypt the QR data
+            const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
+
+            // Sign the *encrypted* data in the JWT
+            const signedQRCode = jwt.sign({data: encryptedQrData}, SECRET_KEY, { expiresIn: '1y' });
+
+            // Generate HMAC for the signed JWT
+            const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
+
+            // Create the object to store as the signed QR code
+            const fullQRCodeData = { token: signedQRCode, hmac: hmac };
             const newProduct = new Product({
                 name,
                 stationId,
                 uuid,
-                signedQRCode,
+                signedQRCode: JSON.stringify(fullQRCodeData), // Store as JSON string
                 batchId,
                 createdAt: new Date(),
             });
 
-            signedQRCodes.push(signedQRCode);
+            signedQRCodes.push(JSON.stringify(fullQRCodeData)); // store this since that's what were returning
             await newProduct.save();
         }
 
         const masterQRData = { batchId };
-        const masterQRCode = jwt.sign(masterQRData, SECRET_KEY, { expiresIn: '1y' });
+         // Encrypt the QR data
+        const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
+         // Sign the *encrypted* data in the JWT
+        const masterQRCode = jwt.sign({data: encryptedMasterQRData}, SECRET_KEY, { expiresIn: '1y' });
+        // Generate HMAC for the signed JWT
+        const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
+          // Create the object to store as the signed QR code
+        const fullMasterQRCodeData = { token: masterQRCode, hmac: hmac };
 
         const newMasterQRCode = new MasterQRCode({
             batchId,
-            masterQRCode,
+            masterQRCode: JSON.stringify(fullMasterQRCodeData), // Store as JSON string
         });
 
         await newMasterQRCode.save();
@@ -113,7 +188,7 @@ const signQRCodeBatch = async (req, res) => {
         res.json({
             message: `${numberOfCodes} QR codes signed and stored successfully`,
             signedQRCodes,
-            masterQRCode,
+            masterQRCode: JSON.stringify(fullMasterQRCodeData),// needs to be the full master qrcode
             batchId
         });
     } catch (error) {
@@ -140,12 +215,23 @@ const fetchLocationName = async (latitude, longitude) => {
 
 const scanQRCodeUnified = async (req, res) => {
     const { signedQRCode, location } = req.body;
+
     try {
-        const decodedData = jwt.verify(signedQRCode, SECRET_KEY);
-       
-        if (decodedData.batchId && !decodedData.uuid) {
+        const qrCodeData = JSON.parse(signedQRCode);
+        const { token, hmac } = qrCodeData;
+
+        if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
+            return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
+        }
+
+        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const encryptedQrData = decodedToken.data;
+        const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
+        const qrData = JSON.parse(decryptedQrData);
+
+        if (qrData.batchId && !qrData.uuid) {
             // This is a master QR code
-            const { batchId } = decodedData;
+            const { batchId } = qrData;
 
             const products = await Product.find({ batchId });
             if (products.length === 0) {
@@ -159,7 +245,7 @@ const scanQRCodeUnified = async (req, res) => {
                 location: { latitude, longitude },
                 locationName : locationName,
             }));
-                
+
              await Scan.insertMany(scanEntries);
 
             // Return batch data in the expected format
@@ -175,9 +261,9 @@ const scanQRCodeUnified = async (req, res) => {
             });
         }
 
-        if (decodedData.uuid) {
+        if (qrData.uuid) {
             // This is an individual product QR code
-            const product = await Product.findOne({ uuid: decodedData.uuid });
+            const product = await Product.findOne({ uuid: qrData.uuid });
             if (!product) {
                 return res.status(404).json({ error: 'Product not found' });
             }
@@ -204,11 +290,21 @@ const scanQRCodeUnified = async (req, res) => {
 const scanQRCodeSeller = async (req, res) => {
     const { signedQRCode, location } = req.body;
       try {
-        const decodedData = jwt.verify(signedQRCode, SECRET_KEY);
+         const qrCodeData = JSON.parse(signedQRCode);
+          const { token, hmac } = qrCodeData;
 
-        if (decodedData.batchId && !decodedData.uuid) {
+        if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
+            return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
+        }
+
+        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const encryptedQrData = decodedToken.data;
+        const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
+        const qrData = JSON.parse(decryptedQrData);
+
+        if (qrData.batchId && !qrData.uuid) {
             // This is a master QR code
-            const { batchId } = decodedData;
+            const { batchId } = qrData;
 
             const products = await Product.find({ batchId });
             if (products.length === 0) {
@@ -222,7 +318,7 @@ const scanQRCodeSeller = async (req, res) => {
                 location: { latitude, longitude },
                locationName: locationName
             }));
-                
+
             await SellerScan.insertMany(sellerScanEntries);
 
             return res.json({
@@ -237,9 +333,9 @@ const scanQRCodeSeller = async (req, res) => {
             });
         }
 
-        if (decodedData.uuid) {
+        if (qrData.uuid) {
             // This is an individual product QR code
-            const product = await Product.findOne({ uuid: decodedData.uuid });
+            const product = await Product.findOne({ uuid: qrData.uuid });
             if (!product) {
                 return res.status(404).json({ error: 'Product not found' });
             }
@@ -261,37 +357,48 @@ const scanQRCodeSeller = async (req, res) => {
         res.status(400).json({ error: 'Invalid or expired QR code' });
     }
 };
-    
-    const getScanHistory = async (req, res) => {
+
+const getScanHistory = async (req, res) => {
     const { signedQRCode } = req.query;
     try {
+       const qrCodeData = JSON.parse(signedQRCode);
+        const { token, hmac } = qrCodeData;
+
+        if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
+            return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
+        }
+
+        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const encryptedQrData = decodedToken.data;
+        const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
+        const qrData = JSON.parse(decryptedQrData);
         // First try to find if it's a master QR code
         const masterQR = await MasterQRCode.findOne({
-            masterQRCode: signedQRCode
+            batchId: qrData.batchId
         }).lean();
-    
+
         if (masterQR) {
             // If master QR, get all products in batch
             const products = await Product.find({
                 batchId: masterQR.batchId
             }).lean();
-    
+
             const productsWithScans = await Promise.all(products.map(async (product) => {
                 const scans = await SellerScan.find({ productId: product._id })
                     .sort('-scannedAt')
                     .lean();
-    
+
                 return {
                     ...product,
                      scans: scans.map(scan => ({
                               location: scan.location,
                             scannedAt: scan.scannedAt,
-                            locationName: scan.locationName,
+                             locationName: scan.locationName
                         }))
-    
+
                 };
             }));
-    
+
             return res.json({
                 type: 'batch',
                 data: {
@@ -302,36 +409,36 @@ const scanQRCodeSeller = async (req, res) => {
                 }
             });
         }
-    
+
         // If not master QR, look for individual product
         const product = await Product.findOne({
-            signedQRCode
+            uuid: qrData.uuid
         }).lean();
-    
+
         if (product) {
             const scans = await SellerScan.find({
                 productId: product._id
             })
             .sort('-scannedAt')
             .lean();
-    
+
              return res.json({
                 type: 'product',
                 data: {
                     ...product,
                      scans: scans.map(scan => ({
-                             location: scan.location,
+                              location: scan.location,
                             scannedAt: scan.scannedAt,
                              locationName: scan.locationName
                         }))
                 }
             });
         }
-    
+
         return res.status(404).json({
             error: 'No scan history found for this QR code'
         });
-    
+
     } catch (error) {
         console.error('Error fetching scan history:', error);
         res.status(500).json({
