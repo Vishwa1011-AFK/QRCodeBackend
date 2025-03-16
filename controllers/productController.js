@@ -13,6 +13,7 @@ const fetch = require('node-fetch');
 const crypto = require('crypto');
 
 const SECRET_KEY = process.env.AES_SECRET_KEY;
+const JWT_SECRET_KEY = process.env.JWT_SECRET_KEY;
 const HMAC_SECRET_KEY = process.env.HMAC_SECRET_KEY;
 const IV_LENGTH = 16;
 
@@ -53,7 +54,6 @@ function verifyHMAC(data, hmac, key) {
 // Add new endpoint for downloading ZIP file
 const downloadBatchZip = async (req, res) => {
     const { batchId } = req.params;
-
     try {
         const products = await Product.find({ batchId });
         if (products.length === 0) {
@@ -64,133 +64,140 @@ const downloadBatchZip = async (req, res) => {
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
 
         const imagePaths = [];
-
-        // Generate QR code images for each product
         for (const product of products) {
             const filePath = path.join(tempDir, `${product.uuid}.png`);
-            try{
-                 const qrCodeData = JSON.parse(product.signedQRCode); // needs to parse the string since is now JSON string
-                 await QRCode.toFile(filePath, qrCodeData.token);
-                } catch (error){
-                    console.error('Error generating QR code:', error);
-                    res.status(500).json({ error: 'Error generating QR codes' });
-                }
+            const qrCodeData = JSON.parse(product.signedQRCode);
+            await QRCode.toFile(filePath, qrCodeData.token);
             imagePaths.push(filePath);
         }
 
-        // Generate master QR code
         const masterQRCode = await MasterQRCode.findOne({ batchId });
+        let masterFilePath;
         if (masterQRCode) {
-            const masterFilePath = path.join(tempDir, `master-${batchId}.png`);
-             try{
-                 const qrCodeData = JSON.parse(masterQRCode.masterQRCode); // needs to parse the string since is now JSON string
-                 await QRCode.toFile(masterFilePath, qrCodeData.token);
-             } catch (error){
-                    console.error('Error generating QR code:', error);
-                    res.status(500).json({ error: 'Error generating QR codes' });
-                }
+            masterFilePath = path.join(tempDir, `master-${batchId}.png`);
+            const qrCodeData = JSON.parse(masterQRCode.masterQRCode);
+            await QRCode.toFile(masterFilePath, qrCodeData.token);
             imagePaths.push(masterFilePath);
         }
 
-        // Create ZIP file
         const zipFilePath = path.join(tempDir, `batch-${batchId}.zip`);
         const output = fs.createWriteStream(zipFilePath);
         const archive = archiver('zip', { zlib: { level: 9 } });
-
         archive.pipe(output);
-
-        // Add all images to the ZIP
         imagePaths.forEach((filePath) => {
             archive.file(filePath, { name: path.basename(filePath) });
         });
-
         await archive.finalize();
 
-        // Send the ZIP file
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', `attachment; filename=batch-${batchId}.zip`);
         const fileStream = fs.createReadStream(zipFilePath);
         fileStream.pipe(res);
 
-        // Clean up files after sending
-        fileStream.on('close', () => {
+        const cleanup = () => {
             imagePaths.forEach((filePath) => {
-                 try{
-                    fs.unlinkSync(filePath)
-                }catch (error){
-                    console.error('Error deleting file:', error);
+                try {
+                    fs.unlinkSync(filePath);
+                } catch (err) {
+                    console.error('Error deleting file:', err);
                 }
             });
-              try{
-                 fs.unlinkSync(zipFilePath)
-                }catch (error){
-                    console.error('Error deleting file:', error);
-                }
+            try {
+                fs.unlinkSync(zipFilePath);
+            } catch (err) {
+                console.error('Error deleting ZIP file:', err);
+            }
+        };
+
+        fileStream.on('close', cleanup);
+        fileStream.on('error', (err) => {
+            console.error('File stream error:', err);
+            cleanup();
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Error sending ZIP file' });
+            }
         });
 
     } catch (error) {
         console.error('Error generating batch ZIP:', error);
+        // Cleanup on error before stream
+        const tempDir = path.join(__dirname, '../temp');
+        const zipFilePath = path.join(tempDir, `batch-${batchId}.zip`);
+        imagePaths.forEach((filePath) => {
+            try {
+                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            } catch (err) {
+                console.error('Error deleting file:', err);
+            }
+        });
+        if (fs.existsSync(zipFilePath)) {
+            try {
+                fs.unlinkSync(zipFilePath);
+            } catch (err) {
+                console.error('Error deleting ZIP file:', err);
+            }
+        }
         res.status(500).json({ error: 'Error generating batch ZIP file' });
     }
 };
 
 const signQRCodeBatch = async (req, res) => {
-    const { name, stationId, numberOfCodes } = req.body;
+    const { name, stationId, numberOfCodes, page = 1, limit = 20 } = req.body;
     const batchId = uuidv4();
     const signedQRCodes = [];
+    const skip = (page - 1) * limit;
+    const effectiveLimit = Math.min(limit, numberOfCodes - skip);
 
     try {
-        for (let i = 0; i < numberOfCodes; i++) {
+        for (let i = skip; i < skip + effectiveLimit && i < numberOfCodes; i++) {
             const uuid = uuidv4();
             const qrData = { name, stationId, uuid };
-
-            // Encrypt the QR data
             const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
-
-            // Sign the *encrypted* data in the JWT
-            const signedQRCode = jwt.sign({data: encryptedQrData}, SECRET_KEY, { expiresIn: '1y' });
-
-            // Generate HMAC for the signed JWT
+            const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
             const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
-
-            // Create the object to store as the signed QR code
             const fullQRCodeData = { token: signedQRCode, hmac: hmac };
             const newProduct = new Product({
                 name,
                 stationId,
                 uuid,
-                signedQRCode: JSON.stringify(fullQRCodeData), // Store as JSON string
+                signedQRCode: JSON.stringify(fullQRCodeData),
                 batchId,
                 createdAt: new Date(),
             });
-
-            signedQRCodes.push(JSON.stringify(fullQRCodeData)); // store this since that's what were returning
+            signedQRCodes.push(JSON.stringify(fullQRCodeData));
             await newProduct.save();
         }
 
-        const masterQRData = { batchId };
-         // Encrypt the QR data
-        const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
-         // Sign the *encrypted* data in the JWT
-        const masterQRCode = jwt.sign({data: encryptedMasterQRData}, SECRET_KEY, { expiresIn: '1y' });
-        // Generate HMAC for the signed JWT
-        const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
-          // Create the object to store as the signed QR code
-        const fullMasterQRCodeData = { token: masterQRCode, hmac: hmac };
-
-        const newMasterQRCode = new MasterQRCode({
-            batchId,
-            masterQRCode: JSON.stringify(fullMasterQRCodeData), // Store as JSON string
-        });
-
-        await newMasterQRCode.save();
-
-        res.json({
-            message: `${numberOfCodes} QR codes signed and stored successfully`,
-            signedQRCodes,
-            masterQRCode: JSON.stringify(fullMasterQRCodeData),// needs to be the full master qrcode
-            batchId
-        });
+        if (skip === 0) {
+            const masterQRData = { batchId };
+            const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
+            const masterQRCode = jwt.sign({ data: encryptedMasterQRData }, JWT_SECRET_KEY, { expiresIn: '1y' });
+            const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
+            const fullMasterQRCodeData = { token: masterQRCode, hmac: hmac };
+            const newMasterQRCode = new MasterQRCode({
+                batchId,
+                masterQRCode: JSON.stringify(fullMasterQRCodeData),
+            });
+            await newMasterQRCode.save();
+            res.json({
+                message: `${effectiveLimit} QR codes signed and stored successfully`,
+                signedQRCodes,
+                masterQRCode: JSON.stringify(fullMasterQRCodeData),
+                batchId,
+                total: numberOfCodes,
+                page,
+                pages: Math.ceil(numberOfCodes / limit),
+            });
+        } else {
+            res.json({
+                message: `${effectiveLimit} QR codes signed and stored successfully`,
+                signedQRCodes,
+                batchId,
+                total: numberOfCodes,
+                page,
+                pages: Math.ceil(numberOfCodes / limit),
+            });
+        }
     } catch (error) {
         console.error('Error saving QR codes:', error);
         res.status(500).json({ error: 'Error signing QR codes' });
@@ -224,7 +231,7 @@ const scanQRCodeUnified = async (req, res) => {
             return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
         }
 
-        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const decodedToken = jwt.verify(token, JWT_SECRET_KEY);
         const encryptedQrData = decodedToken.data;
         const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
         const qrData = JSON.parse(decryptedQrData);
@@ -297,7 +304,7 @@ const scanQRCodeSeller = async (req, res) => {
             return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
         }
 
-        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const decodedToken = jwt.verify(token, JWT_SECRET_KEY);
         const encryptedQrData = decodedToken.data;
         const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
         const qrData = JSON.parse(decryptedQrData);
@@ -368,7 +375,7 @@ const getScanHistory = async (req, res) => {
             return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
         }
 
-        const decodedToken = jwt.verify(token, SECRET_KEY);
+        const decodedToken = jwt.verify(token, JWT_SECRET_KEY);
         const encryptedQrData = decodedToken.data;
         const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
         const qrData = JSON.parse(decryptedQrData);
