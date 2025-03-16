@@ -66,8 +66,8 @@ const downloadBatchZip = async (req, res) => {
         const imagePaths = [];
         for (const product of products) {
             const filePath = path.join(tempDir, `${product.uuid}.png`);
-            const qrCodeData = JSON.parse(product.signedQRCode);
-            await QRCode.toFile(filePath, qrCodeData.token);
+            // Use the stored JSON string directly (contains both token and hmac)
+            await QRCode.toFile(filePath, product.signedQRCode); // CHANGED HERE
             imagePaths.push(filePath);
         }
 
@@ -75,8 +75,8 @@ const downloadBatchZip = async (req, res) => {
         let masterFilePath;
         if (masterQRCode) {
             masterFilePath = path.join(tempDir, `master-${batchId}.png`);
-            const qrCodeData = JSON.parse(masterQRCode.masterQRCode);
-            await QRCode.toFile(masterFilePath, qrCodeData.token);
+            // Use the stored JSON string directly (contains both token and hmac)
+            await QRCode.toFile(masterFilePath, masterQRCode.masterQRCode); // CHANGED HERE
             imagePaths.push(masterFilePath);
         }
 
