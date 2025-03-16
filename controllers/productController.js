@@ -309,9 +309,28 @@ const scanQRCodeUnified = async (req, res) => {
 
 const scanQRCodeSeller = async (req, res) => {
     const { signedQRCode, location } = req.body;
-      try {
-         const qrCodeData = JSON.parse(signedQRCode);
-          const { token, hmac } = qrCodeData;
+    try {
+        // Validate signedQRCode is a string
+        if (typeof signedQRCode !== 'string' || !signedQRCode.trim()) {
+            return res.status(400).json({ error: 'Invalid QR code: signedQRCode must be a non-empty string' });
+        }
+
+        let qrCodeData;
+        try {
+            qrCodeData = JSON.parse(signedQRCode);
+        } catch (parseError) {
+            return res.status(400).json({ error: 'Invalid QR code: malformed JSON' });
+        }
+
+        const { token, hmac } = qrCodeData;
+
+        // Validate token and hmac
+        if (!token || typeof token !== 'string') {
+            return res.status(400).json({ error: 'Invalid QR code: missing or invalid token' });
+        }
+        if (!hmac || typeof hmac !== 'string') {
+            return res.status(400).json({ error: 'Invalid QR code: missing or invalid hmac' });
+        }
 
         if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
             return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
@@ -321,7 +340,6 @@ const scanQRCodeSeller = async (req, res) => {
         const encryptedQrData = decodedToken.data;
         const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
         const qrData = JSON.parse(decryptedQrData);
-
         if (qrData.batchId && !qrData.uuid) {
             // This is a master QR code
             const { batchId } = qrData;
