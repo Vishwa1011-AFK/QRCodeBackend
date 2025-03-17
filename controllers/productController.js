@@ -66,8 +66,7 @@ const downloadBatchZip = async (req, res) => {
         const imagePaths = [];
         for (const product of products) {
             const filePath = path.join(tempDir, `${product.uuid}.png`);
-            const qrCodeData = JSON.parse(product.signedQRCode);
-            await QRCode.toFile(filePath, qrCodeData.token);
+            await QRCode.toFile(filePath, product.signedQRCode);
             imagePaths.push(filePath);
         }
 
@@ -75,8 +74,7 @@ const downloadBatchZip = async (req, res) => {
         let masterFilePath;
         if (masterQRCode) {
             masterFilePath = path.join(tempDir, `master-${batchId}.png`);
-            const qrCodeData = JSON.parse(masterQRCode.masterQRCode);
-            await QRCode.toFile(masterFilePath, qrCodeData.token);
+            await QRCode.toFile(masterFilePath, masterQRCode.masterQRCode);
             imagePaths.push(masterFilePath);
         }
 
@@ -158,30 +156,45 @@ const signQRCodeBatch = async (req, res) => {
         // Generate signed QR codes for all codes
         for (let i = 0; i < numberOfCodes; i++) {
             const uuid = uuidv4();
-            const qrData = { name, stationId, uuid };
+            const qrData = { name, stationId, uuid, batchId };
             const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
             const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
             const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
-            signedQRCodes.push({ token: signedQRCode, hmac });
+            
+            // Create consistent QR code structure
+            const fullQRCodeData = {
+                token: signedQRCode,
+                hmac,
+                uuid,
+                batchId
+            };
+            
+            signedQRCodes.push(fullQRCodeData);
         }
 
         // Create all products at once
-        const newProducts = signedQRCodes.map((qrCode, index) => new Product({
+        const newProducts = signedQRCodes.map((qrCode) => new Product({
             name,
             stationId,
-            uuid: uuidv4(), // Generate new UUID for each product
+            uuid: qrCode.uuid,
             signedQRCode: JSON.stringify(qrCode),
             batchId,
             createdAt: new Date(),
         }));
 
         await Product.insertMany(newProducts);
+
         // Generate master QR code
         const masterQRData = { batchId };
         const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
         const masterQRCode = jwt.sign({ data: encryptedMasterQRData }, JWT_SECRET_KEY, { expiresIn: '1y' });
         const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
-        const fullMasterQRCodeData = { token: masterQRCode, hmac };
+        const fullMasterQRCodeData = { 
+            token: masterQRCode, 
+            hmac,
+            batchId
+        };
+
         const newMasterQRCode = new MasterQRCode({
             batchId,
             masterQRCode: JSON.stringify(fullMasterQRCodeData),
@@ -225,10 +238,17 @@ const fetchLocationName = async (latitude, longitude) => {
 };
 
 const scanQRCodeUnified = async (req, res) => {
-    const { signedQRCode, location } = req.body;
-
     try {
-        const qrCodeData = JSON.parse(signedQRCode);
+        let qrCodeData;
+        try {
+            qrCodeData = JSON.parse(req.body.signedQRCode);
+        } catch (error) {
+            return res.status(400).json({ error: 'Invalid QR code format - must be JSON' });
+        }
+        
+        if (!qrCodeData.token || !qrCodeData.hmac) {
+            return res.status(400).json({ error: 'Malformed QR code data' });
+        }
         const { token, hmac } = qrCodeData;
 
         if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
@@ -481,10 +501,20 @@ const getScanHistory = async (req, res) => {
     }
 };
 
+function verifyQRStructure(qrData) {
+    if (!qrData.token || !qrData.hmac) {
+        throw new Error('Invalid QR code structure');
+    }
+    if (!verifyHMAC(qrData.token, qrData.hmac, HMAC_SECRET_KEY)) {
+        throw new Error('HMAC verification failed');
+    }
+}
+
 module.exports = {
 signQRCodeBatch,
 scanQRCodeUnified,
 downloadBatchZip,
 getScanHistory,
 scanQRCodeSeller,
+verifyQRStructure
 };
