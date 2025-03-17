@@ -312,22 +312,35 @@ const scanQRCodeSeller = async (req, res) => {
         if (qrData.batchId && !qrData.uuid) {
             // This is a master QR code
             const { batchId } = qrData;
-
+        
+            const masterQR = await MasterQRCode.findOne({ batchId });
+            if (!masterQR) {
+                return res.status(404).json({ error: 'Master QR code not found for this batch' });
+            }
+        
+            // Add a new scan record to masterQRCode
+            masterQR.scanRecords.push({
+                scannedAt: new Date(),
+                location: location,
+            });
+            await masterQR.save();
+        
             const products = await Product.find({ batchId });
             if (products.length === 0) {
                 return res.status(404).json({ error: 'No products found for this batch' });
             }
-
+        
             const { latitude, longitude } = location;
-              const locationName = await fetchLocationName(latitude,longitude)
+            const locationName = await fetchLocationName(latitude, longitude)
             const sellerScanEntries = products.map(product => ({
                 productId: product._id,
                 location: { latitude, longitude },
-               locationName: locationName
+                locationName: locationName,
+                scannedAt: new Date(), // Ensure each SellerScan has the correct scannedAt time
             }));
-
+        
             await SellerScan.insertMany(sellerScanEntries);
-
+        
             return res.json({
                 batch: {
                     batchId: batchId,
