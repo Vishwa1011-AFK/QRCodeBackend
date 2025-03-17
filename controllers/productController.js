@@ -149,55 +149,69 @@ const signQRCodeBatch = async (req, res) => {
     const effectiveLimit = Math.min(limit, numberOfCodes - skip);
 
     try {
-        for (let i = skip; i < skip + effectiveLimit && i < numberOfCodes; i++) {
+        // const signedQRCodes = [];
+        for (let i = 0; i < numberOfCodes; i++) {
             const uuid = uuidv4();
             const qrData = { name, stationId, uuid };
+
+            // Encrypt the QR data
             const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
-            const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
+
+            // Sign the *encrypted* data in the JWT
+            const signedQRCode = jwt.sign({data: encryptedQrData}, JWT_SECRET_KEY, { expiresIn: '1y' });
+
+            // Generate HMAC for the signed JWT
             const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
+
+            // Create the object to store as the signed QR code
             const fullQRCodeData = { token: signedQRCode, hmac: hmac };
-            const newProduct = new Product({
-                name,
-                stationId,
-                uuid,
-                signedQRCode: JSON.stringify(fullQRCodeData),
-                batchId,
-                createdAt: new Date(),
-            });
-            signedQRCodes.push(JSON.stringify(fullQRCodeData));
-            await newProduct.save();
+
+            signedQRCodes.push(fullQRCodeData);
+
         }
 
-        if (skip === 0) {
-            const masterQRData = { batchId };
-            const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
-            const masterQRCode = jwt.sign({ data: encryptedMasterQRData }, JWT_SECRET_KEY, { expiresIn: '1y' });
-            const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
-            const fullMasterQRCodeData = { token: masterQRCode, hmac: hmac };
-            const newMasterQRCode = new MasterQRCode({
-                batchId,
-                masterQRCode: JSON.stringify(fullMasterQRCodeData),
-            });
-            await newMasterQRCode.save();
-            res.json({
-                message: `${effectiveLimit} QR codes signed and stored successfully`,
-                signedQRCodes,
-                masterQRCode: JSON.stringify(fullMasterQRCodeData),
-                batchId,
-                total: numberOfCodes,
-                page,
-                pages: Math.ceil(numberOfCodes / limit),
-            });
-        } else {
-            res.json({
-                message: `${effectiveLimit} QR codes signed and stored successfully`,
-                signedQRCodes,
-                batchId,
-                total: numberOfCodes,
-                page,
-                pages: Math.ceil(numberOfCodes / limit),
-            });
+        let newProducts = [];
+        // Save only the products for the current page to the database.
+        for (let i = skip; i < skip + effectiveLimit && i < numberOfCodes; i++){
+                const newProduct = new Product({
+                    name,
+                    stationId,
+                    uuid: uuidv4(),
+                    signedQRCode: JSON.stringify(signedQRCodes[i]),
+                    batchId,
+                    createdAt: new Date(),
+                });
+
+                newProducts.push(newProduct)
         }
+        await Product.insertMany(newProducts)
+
+        const masterQRData = { batchId };
+         // Encrypt the QR data
+        const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
+         // Sign the *encrypted* data in the JWT
+        const masterQRCode = jwt.sign({data: encryptedMasterQRData}, JWT_SECRET_KEY, { expiresIn: '1y' });
+        // Generate HMAC for the signed JWT
+        const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
+          // Create the object to store as the signed QR code
+        const fullMasterQRCodeData = { token: masterQRCode, hmac: hmac };
+
+        const newMasterQRCode = new MasterQRCode({
+            batchId,
+            masterQRCode: JSON.stringify(fullMasterQRCodeData), // Store as JSON string
+        });
+
+        await newMasterQRCode.save();
+
+        res.json({
+            message: `${effectiveLimit} QR codes signed and stored successfully`,
+            signedQRCodes : signedQRCodes.slice(skip, skip + effectiveLimit),
+            masterQRCode: JSON.stringify(fullMasterQRCodeData),// needs to be the full master qrcode
+            batchId,
+            total: numberOfCodes,
+            page,
+            pages: Math.ceil(numberOfCodes / limit),
+        });
     } catch (error) {
         console.error('Error saving QR codes:', error);
         res.status(500).json({ error: 'Error signing QR codes' });
