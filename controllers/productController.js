@@ -240,8 +240,9 @@ const fetchLocationName = async (latitude, longitude) => {
 const scanQRCodeUnified = async (req, res) => {
     try {
         let qrCodeData;
+        const { signedQRCode, location } = req.body;
         try {
-            qrCodeData = JSON.parse(req.body.signedQRCode);
+            qrCodeData = JSON.parse(signedQRCode);
         } catch (error) {
             return res.status(400).json({ error: 'Invalid QR code format - must be JSON' });
         }
@@ -275,14 +276,15 @@ const scanQRCodeUnified = async (req, res) => {
             }
 
              const { latitude, longitude } = location;
-             const locationName = await fetchLocationName(latitude,longitude)
-            const scanEntries = products.map(product => ({
+             const locationName = await fetchLocationName(latitude, longitude);
+             const scanEntries = products.map(product => ({
                 productId: product._id,
                 location: { latitude, longitude },
-                locationName : locationName,
+                locationName: locationName,
             }));
 
-             await Scan.insertMany(scanEntries);
+            await Scan.insertMany(scanEntries);
+
 
             // Return batch data in the expected format
             return res.json({
@@ -304,13 +306,13 @@ const scanQRCodeUnified = async (req, res) => {
                 return res.status(404).json({ error: 'Product not found' });
             }
            const { latitude, longitude } = location;
-          const locationName = await fetchLocationName(latitude,longitude)
+           const locationName = await fetchLocationName(latitude,longitude)
 
             const scan = new Scan({
                 productId: product._id,
-                location,
-                 locationName : locationName,
-            });
+                location: { latitude, longitude },
+                locationName: locationName,
+                });
             await scan.save();
 
             return res.json({ product });
