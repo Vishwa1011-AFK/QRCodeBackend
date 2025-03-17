@@ -482,6 +482,30 @@ const getScanHistory = async (req, res) => {
     }
 };
 
+const getBatchQRCodes = async (req, res) => {
+    const { batchId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+
+    try {
+        const products = await Product.find({ batchId })
+            .skip((page - 1) * limit)
+            .limit(parseInt(limit));
+        const total = await Product.countDocuments({ batchId });
+
+        const signedQRCodes = products.map(product => JSON.parse(product.signedQRCode));
+
+        res.json({
+            signedQRCodes,
+            page: parseInt(page),
+            pages: Math.ceil(total / limit),
+            total,
+        });
+    } catch (error) {
+        console.error('Error fetching batch QR codes:', error);
+        res.status(500).json({ error: 'Error fetching batch QR codes' });
+    }
+};
+
 function verifyQRStructure(qrData) {
     if (!qrData.token || !qrData.hmac) {
         throw new Error('Invalid QR code structure');
@@ -494,6 +518,7 @@ function verifyQRStructure(qrData) {
 module.exports = {
 signQRCodeBatch,
 scanQRCodeUnified,
+getBatchQRCodes,
 downloadBatchZip,
 getScanHistory,
 scanQRCodeSeller,
