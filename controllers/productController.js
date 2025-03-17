@@ -143,12 +143,19 @@ const downloadBatchZip = async (req, res) => {
 
 const signQRCodeBatch = async (req, res) => {
     const { name, stationId, numberOfCodes, page = 1, limit = 20 } = req.body;
+    
+    // Add validation check
+    if (!name || !stationId) {
+        return res.status(400).json({ 
+            error: 'Both name and stationId are required fields' 
+        });
+    }
+
     const batchId = uuidv4();
     let signedQRCodes = [];
-    const uuids = []; // Store UUIDs for each product
 
     try {
-        // Generate all signed QR codes
+        // Generate signed QR codes for all codes
         for (let i = 0; i < numberOfCodes; i++) {
             const uuid = uuidv4();
             const qrData = { name, stationId, uuid };
@@ -156,20 +163,19 @@ const signQRCodeBatch = async (req, res) => {
             const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
             const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
             signedQRCodes.push({ token: signedQRCode, hmac });
-            uuids.push(uuid); // Store UUID
         }
 
-        // Insert all products into the database
-        const newProducts = uuids.map((uuid, index) => new Product({
+        // Create all products at once
+        const newProducts = signedQRCodes.map((qrCode, index) => new Product({
             name,
             stationId,
-            uuid,
-            signedQRCode: JSON.stringify(signedQRCodes[index]),
+            uuid: uuidv4(), // Generate new UUID for each product
+            signedQRCode: JSON.stringify(qrCode),
             batchId,
             createdAt: new Date(),
         }));
-        await Product.insertMany(newProducts);
 
+        await Product.insertMany(newProducts);
         // Generate master QR code
         const masterQRData = { batchId };
         const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
