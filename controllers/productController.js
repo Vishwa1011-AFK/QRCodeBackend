@@ -417,89 +417,68 @@ const scanQRCodeSeller = async (req, res) => {
 const getScanHistory = async (req, res) => {
     const { signedQRCode } = req.query;
     try {
-       const qrCodeData = JSON.parse(signedQRCode);
+        const qrCodeData = JSON.parse(signedQRCode);
         const { token, hmac } = qrCodeData;
-
         if (!verifyHMAC(token, hmac, HMAC_SECRET_KEY)) {
             return res.status(400).json({ error: 'Invalid QR code: HMAC verification failed' });
         }
-
         const decodedToken = jwt.verify(token, JWT_SECRET_KEY);
         const encryptedQrData = decodedToken.data;
         const decryptedQrData = decrypt(encryptedQrData, SECRET_KEY);
         const qrData = JSON.parse(decryptedQrData);
-        // First try to find if it's a master QR code
-        const masterQR = await MasterQRCode.findOne({
-            batchId: qrData.batchId
-        }).lean();
 
-        if (masterQR) {
-            // If master QR, get all products in batch
-            const products = await Product.find({
-                batchId: masterQR.batchId
-            }).lean();
-
-            const productsWithScans = await Promise.all(products.map(async (product) => {
+        if (!qrData.uuid) {
+            // Master QR code
+            const masterQR = await MasterQRCode.findOne({ batchId: qrData.batchId }).lean();
+            if (masterQR) {
+                const products = await Product.find({ batchId: masterQR.batchId }).lean();
+                const productsWithScans = await Promise.all(products.map(async (product) => {
+                    const scans = await SellerScan.find({ productId: product._id })
+                        .sort('-scannedAt')
+                        .lean();
+                    return {
+                        ...product,
+                        scans: scans.map(scan => ({
+                            location: scan.location,
+                            scannedAt: scan.scannedAt,
+                            locationName: scan.locationName
+                        }))
+                    };
+                }));
+                return res.json({
+                    type: 'batch',
+                    data: {
+                        batchId: masterQR.batchId,
+                        createdAt: masterQR.createdAt,
+                        scanRecords: masterQR.scanRecords,
+                        products: productsWithScans
+                    }
+                });
+            }
+        } else {
+            // Individual QR code
+            const product = await Product.findOne({ uuid: qrData.uuid }).lean();
+            if (product) {
                 const scans = await SellerScan.find({ productId: product._id })
                     .sort('-scannedAt')
                     .lean();
-
-                return {
-                    ...product,
-                     scans: scans.map(scan => ({
-                              location: scan.location,
+                return res.json({
+                    type: 'product',
+                    data: {
+                        ...product,
+                        scans: scans.map(scan => ({
+                            location: scan.location,
                             scannedAt: scan.scannedAt,
-                             locationName: scan.locationName
+                            locationName: scan.locationName
                         }))
-
-                };
-            }));
-
-            return res.json({
-                type: 'batch',
-                data: {
-                    batchId: masterQR.batchId,
-                    createdAt: masterQR.createdAt,
-                    scanRecords: masterQR.scanRecords,
-                    products: productsWithScans
-                }
-            });
+                    }
+                });
+            }
         }
-
-        // If not master QR, look for individual product
-        const product = await Product.findOne({
-            uuid: qrData.uuid
-        }).lean();
-
-        if (product) {
-            const scans = await SellerScan.find({
-                productId: product._id
-            })
-            .sort('-scannedAt')
-            .lean();
-
-             return res.json({
-                type: 'product',
-                data: {
-                    ...product,
-                     scans: scans.map(scan => ({
-                              location: scan.location,
-                            scannedAt: scan.scannedAt,
-                             locationName: scan.locationName
-                        }))
-                }
-            });
-        }
-
-        return res.status(404).json({
-            error: 'No scan history found for this QR code'
-        });
-
+        return res.status(404).json({ error: 'No scan history found for this QR code' });
     } catch (error) {
         console.error('Error fetching scan history:', error);
-        res.status(500).json({
-            error: 'Failed to fetch scan history'
-        });
+        return res.status(500).json({ error: 'Failed to fetch scan history' });
     }
 };
 
