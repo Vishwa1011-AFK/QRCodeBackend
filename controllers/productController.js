@@ -1,8 +1,6 @@
 require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
-const path = require('path');
 const QRCode = require('qrcode');
 const archiver = require('archiver');
 const Product = require('../models/product');
@@ -11,6 +9,7 @@ const MasterQRCode = require('../models/masterQRCode');
 const SellerScan = require('../models/sellerScan');
 const fetch = require('node-fetch');
 const crypto = require('crypto');
+const { LRUCache } = require('lru-cache');
 
 const SECRET_KEY = process.env.AES_SECRET_KEY;
 const JWT_SECRET_KEY = process.env.JWT_SECRET_KEY;
@@ -51,190 +50,198 @@ function verifyHMAC(data, hmac, key) {
   return crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expectedHmac, 'hex'));
 }
 
-// Add new endpoint for downloading ZIP file
-const downloadBatchZip = async (req, res) => {
-    const { batchId } = req.params;
-    try {
-        const products = await Product.find({ batchId });
-        if (products.length === 0) {
-            return res.status(404).json({ error: 'No products found for this batch' });
-        }
-
-        const tempDir = path.join(__dirname, '../temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-
-        const imagePaths = [];
-        for (const product of products) {
-            const filePath = path.join(tempDir, `${product.uuid}.png`);
-            await QRCode.toFile(filePath, product.signedQRCode);
-            imagePaths.push(filePath);
-        }
-
-        const masterQRCode = await MasterQRCode.findOne({ batchId });
-        let masterFilePath;
-        if (masterQRCode) {
-            masterFilePath = path.join(tempDir, `master-${batchId}.png`);
-            await QRCode.toFile(masterFilePath, masterQRCode.masterQRCode);
-            imagePaths.push(masterFilePath);
-        }
-
-        const zipFilePath = path.join(tempDir, `batch-${batchId}.zip`);
-        const output = fs.createWriteStream(zipFilePath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
-        archive.pipe(output);
-        imagePaths.forEach((filePath) => {
-            archive.file(filePath, { name: path.basename(filePath) });
-        });
-        await archive.finalize();
-
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', `attachment; filename=batch-${batchId}.zip`);
-        const fileStream = fs.createReadStream(zipFilePath);
-        fileStream.pipe(res);
-
-        const cleanup = () => {
-            imagePaths.forEach((filePath) => {
-                try {
-                    fs.unlinkSync(filePath);
-                } catch (err) {
-                    console.error('Error deleting file:', err);
-                }
-            });
-            try {
-                fs.unlinkSync(zipFilePath);
-            } catch (err) {
-                console.error('Error deleting ZIP file:', err);
-            }
-        };
-
-        fileStream.on('close', cleanup);
-        fileStream.on('error', (err) => {
-            console.error('File stream error:', err);
-            cleanup();
-            if (!res.headersSent) {
-                res.status(500).json({ error: 'Error sending ZIP file' });
-            }
-        });
-
-    } catch (error) {
-        console.error('Error generating batch ZIP:', error);
-        // Cleanup on error before stream
-        const tempDir = path.join(__dirname, '../temp');
-        const zipFilePath = path.join(tempDir, `batch-${batchId}.zip`);
-        imagePaths.forEach((filePath) => {
-            try {
-                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-            } catch (err) {
-                console.error('Error deleting file:', err);
-            }
-        });
-        if (fs.existsSync(zipFilePath)) {
-            try {
-                fs.unlinkSync(zipFilePath);
-            } catch (err) {
-                console.error('Error deleting ZIP file:', err);
-            }
-        }
-        res.status(500).json({ error: 'Error generating batch ZIP file' });
-    }
-};
-
 const signQRCodeBatch = async (req, res) => {
     const { name, stationId, numberOfCodes, page = 1, limit = 20 } = req.body;
-    
-    // Add validation check
+  
     if (!name || !stationId) {
-        return res.status(400).json({ 
-            error: 'Both name and stationId are required fields' 
-        });
+      return res.status(400).json({ error: 'Both name and stationId are required fields' });
     }
-
+  
+    if (!/^[a-zA-Z0-9-]{1,50}$/.test(name)) {
+      return res.status(400).json({ error: 'Name must be alphanumeric (with hyphens) and up to 50 characters' });
+    }
+  
+    if (!/^[a-zA-Z0-9-]{1,50}$/.test(stationId)) {
+      return res.status(400).json({ error: 'Station ID must be alphanumeric (with hyphens) and up to 50 characters' });
+    }
+  
+    if (!Number.isInteger(numberOfCodes) || numberOfCodes <= 0 || numberOfCodes > 10000) {
+      return res.status(400).json({ error: 'Number of codes must be an integer between 1 and 10,000' });
+    }
+  
     const batchId = uuidv4();
-    let signedQRCodes = [];
-
+    const chunkSize = 100;
+  
     try {
-        // Generate signed QR codes for all codes
-        for (let i = 0; i < numberOfCodes; i++) {
-            const uuid = uuidv4();
-            const qrData = { name, stationId, uuid, batchId };
-            const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
-            const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
-            const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
-            
-            // Create consistent QR code structure
-            const fullQRCodeData = {
-                token: signedQRCode,
-                hmac,
-                uuid,
-                batchId
-            };
-            
-            signedQRCodes.push(fullQRCodeData);
-        }
-
-        // Create all products at once
-        const newProducts = signedQRCodes.map((qrCode) => new Product({
-            name,
-            stationId,
-            uuid: qrCode.uuid,
-            signedQRCode: JSON.stringify(qrCode),
-            batchId,
-            createdAt: new Date(),
-        }));
-
-        await Product.insertMany(newProducts);
-
-        // Generate master QR code
-        const masterQRData = { batchId };
-        const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
-        const masterQRCode = jwt.sign({ data: encryptedMasterQRData }, JWT_SECRET_KEY, { expiresIn: '1y' });
-        const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
-        const fullMasterQRCodeData = { 
-            token: masterQRCode, 
+      const totalChunks = Math.ceil(numberOfCodes / chunkSize);
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, numberOfCodes);
+        const chunkQRCodes = [];
+  
+        for (let j = start; j < end; j++) {
+          const uuid = uuidv4();
+          const qrData = { name, stationId, uuid, batchId };
+          const encryptedQrData = encrypt(JSON.stringify(qrData), SECRET_KEY);
+          const signedQRCode = jwt.sign({ data: encryptedQrData }, JWT_SECRET_KEY, { expiresIn: '1y' });
+          const hmac = generateHMAC(signedQRCode, HMAC_SECRET_KEY);
+  
+          const fullQRCodeData = {
+            token: signedQRCode,
             hmac,
-            batchId
-        };
-
-        const newMasterQRCode = new MasterQRCode({
+            uuid,
             batchId,
-            masterQRCode: JSON.stringify(fullMasterQRCodeData),
-        });
-        await newMasterQRCode.save();
-
-        // Paginate response
-        const start = (page - 1) * limit;
-        const end = start + limit;
-        const paginatedQRCodes = signedQRCodes.slice(start, end);
-
-        res.json({
-            message: `${paginatedQRCodes.length} QR codes retrieved`,
-            signedQRCodes: paginatedQRCodes,
-            masterQRCode: JSON.stringify(fullMasterQRCodeData),
-            batchId,
-            total: numberOfCodes,
-            page,
-            pages: Math.ceil(numberOfCodes / limit),
-        });
+          };
+  
+          chunkQRCodes.push({
+            insertOne: {
+              document: {
+                name,
+                stationId,
+                uuid,
+                signedQRCode: JSON.stringify(fullQRCodeData),
+                batchId,
+                createdAt: new Date(),
+              },
+            },
+          });
+        }
+  
+        await Product.bulkWrite(chunkQRCodes);
+      }
+  
+      // Master QR code generation remains the same
+      const masterQRData = { batchId };
+      const encryptedMasterQRData = encrypt(JSON.stringify(masterQRData), SECRET_KEY);
+      const masterQRCode = jwt.sign({ data: encryptedMasterQRData }, JWT_SECRET_KEY, { expiresIn: '1y' });
+      const hmac = generateHMAC(masterQRCode, HMAC_SECRET_KEY);
+      const fullMasterQRCodeData = {
+        token: masterQRCode,
+        hmac,
+        batchId,
+      };
+  
+      const newMasterQRCode = new MasterQRCode({
+        batchId,
+        masterQRCode: JSON.stringify(fullMasterQRCodeData),
+      });
+      await newMasterQRCode.save();
+  
+      const products = await Product.find({ batchId })
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit));
+      const total = await Product.countDocuments({ batchId });
+  
+      const signedQRCodes = products.map((product) => JSON.parse(product.signedQRCode));
+  
+      res.json({
+        message: `${signedQRCodes.length} QR codes retrieved`,
+        signedQRCodes,
+        masterQRCode: JSON.stringify(fullMasterQRCodeData),
+        batchId,
+        total,
+        page,
+        pages: Math.ceil(total / limit),
+      });
     } catch (error) {
-        console.error('Error saving QR codes:', error);
-        res.status(500).json({ error: 'Error signing QR codes' });
+      console.error('Error saving QR codes:', error);
+      res.status(500).json({ error: 'Error signing QR codes' });
     }
+  };
+
+const downloadBatchZip = async (req, res) => {
+  const { batchId } = req.params;
+  try {
+    const products = await Product.find({ batchId });
+    if (products.length === 0) {
+      return res.status(404).json({ error: 'No products found for this batch' });
+    }
+
+    const masterQRCode = await MasterQRCode.findOne({ batchId });
+    if (!masterQRCode) {
+      return res.status(404).json({ error: 'Master QR code not found for this batch' });
+    }
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename=batch-${batchId}.zip`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(res);
+
+    // Add master QR code
+    const masterQRBuffer = await QRCode.toBuffer(masterQRCode.masterQRCode);
+    archive.append(masterQRBuffer, { name: `master-${batchId}.png` });
+
+    // Add product QR codes
+    for (const product of products) {
+      const qrBuffer = await QRCode.toBuffer(product.signedQRCode);
+      archive.append(qrBuffer, { name: `${product.uuid}.png` });
+    }
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('Error generating batch ZIP:', error);
+    res.status(500).json({ error: 'Error generating batch ZIP file' });
+  }
 };
 
+const cache = new LRUCache({
+    max: 5000, // Increased cache size
+    maxAge: 1000 * 60 * 60, // 1 hour TTL for successful responses
+  });
+
+const locationFetchQueue = new Map();
+
 const fetchLocationName = async (latitude, longitude) => {
-    try {
-        // Add delay to prevent rate limiting
+  const key = `${latitude},${longitude}`;
+
+  // Return cached result if available
+  if (cache.has(key)) {
+    return cache.get(key);
+  }
+
+  // Check for existing request
+  if (locationFetchQueue.has(key)) {
+    return await locationFetchQueue.get(key);
+  }
+
+  try {
+    const fetchPromise = (async () => {
+      try {
+        // Respect Nominatim's rate limit policy
         await new Promise(resolve => setTimeout(resolve, 1000));
+        
         const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
         );
-        if (!response.ok) throw new Error('Failed to fetch location');
+        
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
         const data = await response.json();
-        return data.display_name || 'Location not found';
-    } catch (error) {
+        const locationName = data.display_name || 'Location not found';
+        
+        // Cache successful response
+        cache.set(key, locationName);
+        return locationName;
+      } catch (error) {
         console.error('Error fetching location:', error);
-        return 'Location unavailable';
-    }
+        const errorMessage = 'Location unavailable';
+        
+        // Cache errors for shorter duration (5 minutes)
+        cache.set(key, errorMessage, { maxAge: 1000 * 60 * 5 });
+        return errorMessage;
+      } finally {
+        locationFetchQueue.delete(key);
+      }
+    })();
+
+    // Store promise in queue
+    locationFetchQueue.set(key, fetchPromise);
+    return await fetchPromise;
+  } catch (error) {
+    console.error('Unexpected error in location fetch:', error);
+    return 'Location service unavailable';
+  }
 };
 
 const scanQRCodeUnified = async (req, res) => {

@@ -6,10 +6,11 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
+    "lru-cache": "^11.0.2",
     "mongoose": "^8.8.4",
     "node-fetch": "^2.7.0",
     "qrcode": "^1.5.4",
-    "uuid": "^11.0.3"
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
